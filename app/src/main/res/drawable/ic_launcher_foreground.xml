@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- karosszéria -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M27,60 Q27,56 31,56 L77,56 Q81,56 81,60 L81,68 L27,68 Z"/>
+    <!-- kabin -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M36,56 L42,44 L66,44 L73,56 Z"/>
+    <!-- ablakok -->
+    <path android:fillColor="#1565C0"
+        android:pathData="M40,54 L44,47 L52,47 L52,54 Z"/>
+    <path android:fillColor="#1565C0"
+        android:pathData="M56,54 L56,47 L64,47 L69,54 Z"/>
+    <!-- kerekek -->
+    <path android:fillColor="#263238"
+        android:pathData="M34,68 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0"/>
+    <path android:fillColor="#263238"
+        android:pathData="M62,68 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0"/>
+    <!-- sérülés jelzés -->
+    <path android:fillColor="#FF9800" android:strokeColor="#BF360C" android:strokeWidth="1"
+        android:pathData="M72,42 L75.5,50.5 L84,54 L75.5,57.5 L72,66 L68.5,57.5 L60,54 L68.5,50.5 Z"/>
+</vector>
