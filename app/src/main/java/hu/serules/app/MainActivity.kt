@@ -6,7 +6,40 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
+import android.util.Size
+import android.view.MotionEvent
+import android.view.OrientationEventListener
+import android.view.ScaleGestureDetector
+import android.view.Surface
+import androidx.camera.core.Camera
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Slider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.IntSize
 import android.os.Bundle
 import android.provider.MediaStore
 import android.speech.RecognizerIntent
@@ -29,6 +62,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -119,27 +153,97 @@ class PlateAnalyzer(private val onPlate: (String) -> Unit) : ImageAnalysis.Analy
 }
 
 @Composable
-fun CameraView(modifier: Modifier, analyzer: ImageAnalysis.Analyzer? = null, capture: ImageCapture? = null) {
+fun CameraView(
+    modifier: Modifier, analyzer: ImageAnalysis.Analyzer? = null, capture: ImageCapture? = null,
+    ratio43: Boolean = true, onCamera: (Camera) -> Unit = {}, onZoom: (Float) -> Unit = {}
+) {
     val owner = LocalContext.current as ComponentActivity
-    AndroidView(modifier = modifier, factory = { c ->
-        val pv = PreviewView(c)
-        val future = ProcessCameraProvider.getInstance(c)
-        future.addListener({
-            val provider = future.get()
-            val preview = Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
-            val uses = mutableListOf<UseCase>(preview)
-            if (analyzer != null) {
-                uses += ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
-                    .also { it.setAnalyzer(Executors.newSingleThreadExecutor(), analyzer) }
+    val analysis = remember(analyzer) {
+        analyzer?.let { a ->
+            ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+                .also { it.setAnalyzer(Executors.newSingleThreadExecutor(), a) }
+        }
+    }
+    // A telefon fizikai tájolásához igazítja a képek forgatását (állóban és fekvőben is helyes legyen).
+    DisposableEffect(analysis, capture) {
+        val l = object : OrientationEventListener(owner) {
+            override fun onOrientationChanged(o: Int) {
+                if (o == ORIENTATION_UNKNOWN) return
+                val r = when (o) {
+                    in 45..134 -> Surface.ROTATION_270
+                    in 135..224 -> Surface.ROTATION_180
+                    in 225..314 -> Surface.ROTATION_90
+                    else -> Surface.ROTATION_0
+                }
+                analysis?.targetRotation = r
+                capture?.targetRotation = r
             }
-            if (capture != null) uses += capture
-            provider.unbindAll()
-            provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, *uses.toTypedArray())
-        }, ContextCompat.getMainExecutor(c))
-        pv
-    })
+        }
+        l.enable()
+        onDispose { l.disable() }
+    }
+    key(analysis, capture, ratio43) {
+        AndroidView(modifier = modifier, factory = { c ->
+            val pv = PreviewView(c)
+            if (capture != null) pv.scaleType = PreviewView.ScaleType.FIT_CENTER
+            var camera: Camera? = null
+            val sgd = ScaleGestureDetector(c, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(d: ScaleGestureDetector): Boolean {
+                    val cm = camera ?: return true
+                    val z = cm.cameraInfo.zoomState.value ?: return true
+                    cm.cameraControl.setZoomRatio((z.zoomRatio * d.scaleFactor).coerceIn(z.minZoomRatio, z.maxZoomRatio))
+                    return true
+                }
+            })
+            pv.setOnTouchListener { v, e ->
+                sgd.onTouchEvent(e)
+                if (e.action == MotionEvent.ACTION_UP) v.performClick()
+                true
+            }
+            val future = ProcessCameraProvider.getInstance(c)
+            future.addListener({
+                val provider = future.get()
+                val aspect = if (ratio43) AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
+                else AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+                val preview = Preview.Builder()
+                    .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(aspect).build())
+                    .build().also { it.setSurfaceProvider(pv.surfaceProvider) }
+                val uses = mutableListOf<UseCase>(preview)
+                if (analysis != null) uses += analysis
+                if (capture != null) uses += capture
+                provider.unbindAll()
+                val cm = provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, *uses.toTypedArray())
+                camera = cm
+                onCamera(cm)
+                cm.cameraInfo.zoomState.observe(owner) { onZoom(it.linearZoom) }
+            }, ContextCompat.getMainExecutor(c))
+            pv
+        })
+    }
 }
+
+/** Képméret és képarány: quality 0 = ~2 MP, 1 = ~5 MP, 2 = a telefon maximuma. */
+fun buildCapture(ratio43: Boolean, quality: Int): ImageCapture {
+    val aspect = if (ratio43) AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
+    else AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+    val size = when (quality) {
+        0 -> if (ratio43) Size(1600, 1200) else Size(1920, 1080)
+        1 -> if (ratio43) Size(2592, 1944) else Size(3264, 1836)
+        else -> null
+    }
+    val rs = ResolutionSelector.Builder().setAspectRatioStrategy(aspect)
+        .setResolutionStrategy(
+            if (size == null) ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY
+            else ResolutionStrategy(size, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
+        ).build()
+    return ImageCapture.Builder().setResolutionSelector(rs)
+        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build()
+}
+
+fun speechIntent(): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+    .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+    .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU")
+    .putExtra(RecognizerIntent.EXTRA_PROMPT, "Diktáld a megjegyzést")
 
 /** Kép mentése: Pictures/serulesek/<RENDSZÁM>/<ÉÉÉÉ-HH-NN>/ */
 fun takePhoto(ctx: Context, cap: ImageCapture, plate: String, onDone: (String?) -> Unit) {
@@ -173,22 +277,100 @@ fun PhotoScreen(
     onPhoto: (String) -> Unit, onNext: () -> Unit, onEditPlate: (() -> Unit)?
 ) {
     val ctx = LocalContext.current
-    val capture = remember { ImageCapture.Builder().build() }
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(plate, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            if (onEditPlate != null) TextButton(onEditPlate) { Text("Rendszám módosítása") }
-        }
-        if (hasCam) CameraView(Modifier.weight(1f).fillMaxWidth(), capture = capture)
-        else Text("Kamera-engedély szükséges.", Modifier.weight(1f).padding(20.dp))
-        Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    val prefs = remember { ctx.getSharedPreferences("settings", Context.MODE_PRIVATE) }
+    var ratio43 by remember { mutableStateOf(prefs.getBoolean("ratio43", true)) }
+    var quality by remember { mutableIntStateOf(prefs.getInt("quality", 1)) }
+    val capture = remember(ratio43, quality) { buildCapture(ratio43, quality) }
+    var cam by remember { mutableStateOf<Camera?>(null) }
+    var zoom by remember { mutableFloatStateOf(0f) }
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    val camView: @Composable (Modifier) -> Unit = { m ->
+        if (hasCam) CameraView(m, capture = capture, ratio43 = ratio43, onCamera = { cam = it }, onZoom = { zoom = it })
+        else Text("Kamera-engedély szükséges.", m.padding(20.dp))
+    }
+    val controls: @Composable (Modifier) -> Unit = { m ->
+        Column(m.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🔍 ")
+                Slider(zoom, { zoom = it; cam?.cameraControl?.setLinearZoom(it) }, Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(selected = ratio43, onClick = { ratio43 = true; prefs.edit().putBoolean("ratio43", true).apply() }, label = { Text("4:3") })
+                FilterChip(selected = !ratio43, onClick = { ratio43 = false; prefs.edit().putBoolean("ratio43", false).apply() }, label = { Text("16:9") })
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("~2 MP", "~5 MP", "Max").forEachIndexed { i, l ->
+                    FilterChip(selected = quality == i, onClick = { quality = i; prefs.edit().putInt("quality", i).apply() }, label = { Text(l) })
+                }
+            }
             Button({
                 takePhoto(ctx, capture, plate) { u ->
                     if (u != null) onPhoto(u) else Toast.makeText(ctx, "A mentés nem sikerült", Toast.LENGTH_SHORT).show()
                 }
-            }) { Text("📷 Fotó ($count)") }
-            OutlinedButton(onNext) { Text(nextText) }
+            }, Modifier.fillMaxWidth()) { Text("📷 Fotó ($count)") }
+            OutlinedButton(onNext, Modifier.fillMaxWidth()) { Text(nextText) }
         }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically) {
+            Text(plate, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            if (onEditPlate != null) TextButton(onEditPlate) { Text("Rendszám módosítása") }
+        }
+        if (landscape) Row(Modifier.weight(1f).fillMaxWidth()) {
+            camView(Modifier.weight(1f).fillMaxHeight())
+            controls(Modifier.width(260.dp).verticalScroll(rememberScrollState()))
+        } else {
+            camView(Modifier.weight(1f).fillMaxWidth())
+            controls(Modifier.fillMaxWidth())
+        }
+    }
+}
+
+@Composable
+fun ZoomableImage(model: String) {
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    fun clamp(o: Offset, sc: Float): Offset {
+        val mx = size.width * (sc - 1f) / 2f
+        val my = size.height * (sc - 1f) / 2f
+        return Offset(o.x.coerceIn(-mx, mx), o.y.coerceIn(-my, my))
+    }
+    Box(
+        Modifier.fillMaxSize().clipToBounds().onSizeChanged { size = it }
+            .pointerInput(Unit) {
+                detectTapGestures(onDoubleTap = {
+                    if (scale > 1f) { scale = 1f; offset = Offset.Zero } else scale = 2.5f
+                })
+            }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val ev = awaitPointerEvent()
+                        if (ev.changes.size > 1 || scale > 1f) {
+                            val z = ev.calculateZoom()
+                            val pan = ev.calculatePan()
+                            val c = ev.calculateCentroid(useCurrent = false) - Offset(size.width / 2f, size.height / 2f)
+                            val ns = (scale * z).coerceIn(1f, 6f)
+                            val real = ns / scale
+                            offset = if (ns <= 1f) Offset.Zero else clamp(c + pan - (c - offset) * real, ns)
+                            scale = ns
+                            ev.changes.forEach { if (it.positionChanged()) it.consume() }
+                        }
+                    } while (ev.changes.any { it.pressed })
+                }
+            }
+    ) {
+        AsyncImage(
+            model = model, contentDescription = "Sérülésfotó", contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize().graphicsLayer(
+                scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y
+            )
+        )
     }
 }
 
@@ -338,11 +520,35 @@ fun App() {
 
         "detail" -> {
             val rec = recs.find { it.ts == selTs }
+            var editing by rememberSaveable { mutableStateOf(false) }
+            var draft by rememberSaveable { mutableStateOf("") }
+            val speechD = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+                val t = r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+                if (t != null) draft = if (draft.isBlank()) t else "$draft $t"
+            }
             if (rec == null) LaunchedEffect(Unit) { screen = "list" }
-            else Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            else Column(Modifier.fillMaxSize().imePadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(rec.plate, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Text(SimpleDateFormat("yyyy.MM.dd. HH:mm", Locale.US).format(Date(rec.ts)))
-                Text(rec.note.ifBlank { "(nincs megjegyzés)" })
+                if (editing) {
+                    OutlinedTextField(draft, { draft = it }, Modifier.fillMaxWidth(), minLines = 3, label = { Text("Megjegyzés") })
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button({
+                            recs = recs.map { if (it.ts == rec.ts) it.copy(note = draft.trim()) else it }
+                            Store.save(ctx, recs)
+                            editing = false
+                        }) { Text("💾 Mentés") }
+                        OutlinedButton({
+                            try { speechD.launch(speechIntent()) } catch (e: ActivityNotFoundException) {
+                                Toast.makeText(ctx, "Nincs elérhető hangfelismerés", Toast.LENGTH_SHORT).show()
+                            }
+                        }) { Text("🎤") }
+                        OutlinedButton({ editing = false }) { Text("Mégse") }
+                    }
+                } else {
+                    Text(rec.note.ifBlank { "(nincs megjegyzés)" })
+                    TextButton({ draft = rec.note; editing = true }) { Text("✏️ Megjegyzés szerkesztése") }
+                }
                 if (rec.photos > 0) Text("+ ${rec.photos} korábbi fotó, ami ebben a verzióban nem jeleníthető meg.")
                 LazyVerticalGrid(GridCells.Adaptive(110.dp), Modifier.weight(1f),
                     horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -361,14 +567,14 @@ fun App() {
             var confirm by remember { mutableStateOf(false) }
             if (rec == null || rec.uris.isEmpty()) LaunchedEffect(Unit) { screen = "detail" }
             else {
-                val idx = viewIdx.coerceIn(0, rec.uris.size - 1)
+                val pager = rememberPagerState(initialPage = viewIdx.coerceIn(0, rec.uris.size - 1)) { rec.uris.size }
                 Column(Modifier.fillMaxSize()) {
-                    AsyncImage(model = rec.uris[idx], contentDescription = "Sérülésfotó", contentScale = ContentScale.Fit,
-                        modifier = Modifier.weight(1f).fillMaxWidth())
-                    Text("${idx + 1} / ${rec.uris.size}", Modifier.align(Alignment.CenterHorizontally))
+                    HorizontalPager(pager, Modifier.weight(1f).fillMaxWidth(), key = { rec.uris[it] }) { page ->
+                        ZoomableImage(rec.uris[page])
+                    }
+                    Text("${pager.currentPage + 1} / ${rec.uris.size} · húzd oldalra a lapozáshoz, két ujjal nagyíts",
+                        Modifier.align(Alignment.CenterHorizontally).padding(top = 6.dp), fontSize = 13.sp)
                     Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton({ viewIdx = idx - 1 }, enabled = idx > 0) { Text("‹") }
-                        OutlinedButton({ viewIdx = idx + 1 }, enabled = idx < rec.uris.size - 1) { Text("›") }
                         Button({ confirm = true }) { Text("🗑 Törlés") }
                         OutlinedButton({ screen = "detail" }) { Text("Vissza") }
                     }
@@ -380,10 +586,10 @@ fun App() {
                     confirmButton = {
                         TextButton({
                             confirm = false
+                            val idx = pager.currentPage.coerceIn(0, rec.uris.size - 1)
                             deletePhoto(ctx, rec.uris[idx])
                             recs = recs.map { if (it.ts == rec.ts) it.copy(uris = it.uris.filterIndexed { i, _ -> i != idx }) else it }
                             Store.save(ctx, recs)
-                            viewIdx = (idx - 1).coerceAtLeast(0)
                         }) { Text("Törlés") }
                     },
                     dismissButton = { TextButton({ confirm = false }) { Text("Mégse") } }
