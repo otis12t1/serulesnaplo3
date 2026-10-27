@@ -192,6 +192,15 @@ fun PhotoScreen(
     }
 }
 
+fun dayOf(ts: Long): String = SimpleDateFormat("yyyy.MM.dd.", Locale.US).format(Date(ts))
+
+@Composable
+fun GroupRow(title: String, sub: String, onClick: () -> Unit) {
+    OutlinedButton(onClick, Modifier.fillMaxWidth().height(68.dp)) {
+        Text("$title  ·  $sub", fontSize = 18.sp)
+    }
+}
+
 @Composable
 fun BigButton(text: String, primary: Boolean = true, onClick: () -> Unit) {
     val m = Modifier.fillMaxWidth().widthIn(max = 520.dp).height(88.dp)
@@ -219,6 +228,13 @@ fun App() {
     var photoUris by rememberSaveable { mutableStateOf("") }
     var selTs by rememberSaveable { mutableLongStateOf(0L) }
     var viewIdx by rememberSaveable { mutableIntStateOf(0) }
+    var listPlate by rememberSaveable { mutableStateOf("") }
+    var listDay by rememberSaveable { mutableStateOf("") }
+    val listUp = {
+        if (listDay.isNotEmpty()) listDay = ""
+        else if (listPlate.isNotEmpty()) listPlate = ""
+        else screen = "home"
+    }
     val newUris = photoUris.split("\n").filter { it.isNotEmpty() }
     var note by rememberSaveable { mutableStateOf("") }
     var recs by remember { mutableStateOf(Store.load(ctx)) }
@@ -229,7 +245,7 @@ fun App() {
     LaunchedEffect(Unit) { if (!hasCam) permLauncher.launch(Manifest.permission.CAMERA) }
 
     BackHandler(screen != "home") {
-        screen = when (screen) { "photos" -> "edit"; "note" -> "photos"; "viewer" -> "detail"; "addphoto" -> "detail"; "detail" -> "list"; else -> "home" }
+        if (screen == "list") listUp() else screen = when (screen) { "photos" -> "edit"; "note" -> "photos"; "viewer" -> "detail"; "addphoto" -> "detail"; "detail" -> "list"; else -> "home" }
     }
 
     when (screen) {
@@ -249,7 +265,7 @@ fun App() {
                 if (recs.isNotEmpty()) {
                     BigButton("📊 Export Excelbe (.xlsx)", primary = false) { exportAndShare(ctx, recs) }
                 }
-                BigButton("📋 Lista (${recs.size})", primary = false) { screen = "list" }
+                BigButton("📋 Lista (${recs.size})", primary = false) { listPlate = ""; listDay = ""; screen = "list" }
             }
         }
 
@@ -376,19 +392,36 @@ fun App() {
         }
 
         "list" -> Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Rögzített sérülések", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text("Koppints egy sorra a fotók megtekintéséhez.")
+            val title = when {
+                listDay.isNotEmpty() -> "$listPlate · $listDay"
+                listPlate.isNotEmpty() -> listPlate
+                else -> "Rögzített sérülések"
+            }
+            Text(title, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            if (recs.isEmpty()) Text("Még nincs rögzített sérülés.")
             LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(recs.reversed()) { r ->
-                    Column(Modifier.fillMaxWidth().clickable { selTs = r.ts; screen = "detail" }) {
-                        Text("${r.plate} · ${SimpleDateFormat("yyyy.MM.dd. HH:mm", Locale.US).format(Date(r.ts))} · ${r.count} fotó", fontWeight = FontWeight.Bold)
-                        Text(r.note.ifBlank { "(nincs megjegyzés)" })
-                        TextButton({ recs = recs.filter { it !== r }; Store.save(ctx, recs) }) { Text("Törlés") }
+                if (listPlate.isEmpty()) {
+                    val plates = recs.groupBy { it.plate }.entries.sortedBy { it.key }
+                    items(plates) { g ->
+                        GroupRow(g.key, "${g.value.size} sérülés · ${g.value.map { dayOf(it.ts) }.distinct().size} nap") { listPlate = g.key }
+                    }
+                } else if (listDay.isEmpty()) {
+                    val days = recs.filter { it.plate == listPlate }.groupBy { dayOf(it.ts) }.entries.sortedByDescending { it.key }
+                    items(days) { d -> GroupRow(d.key, "${d.value.size} sérülés") { listDay = d.key } }
+                } else {
+                    val day = recs.filter { it.plate == listPlate && dayOf(it.ts) == listDay }.sortedByDescending { it.ts }
+                    if (day.isEmpty()) item { Text("Nincs több sérülés ezen a napon.") }
+                    items(day) { r ->
+                        Column(Modifier.fillMaxWidth().clickable { selTs = r.ts; screen = "detail" }) {
+                            Text("${SimpleDateFormat("HH:mm", Locale.US).format(Date(r.ts))} · ${r.count} fotó", fontWeight = FontWeight.Bold)
+                            Text(r.note.ifBlank { "(nincs megjegyzés)" })
+                            TextButton({ recs = recs.filter { it !== r }; Store.save(ctx, recs) }) { Text("Törlés") }
+                        }
                     }
                 }
             }
             Button({ exportAndShare(ctx, recs) }, Modifier.fillMaxWidth(), enabled = recs.isNotEmpty()) { Text("📊 Export Excelbe (.xlsx)") }
-            OutlinedButton({ screen = "home" }, Modifier.fillMaxWidth()) { Text("Vissza") }
+            OutlinedButton({ listUp() }, Modifier.fillMaxWidth()) { Text("Vissza") }
         }
     }
 }
